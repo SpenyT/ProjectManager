@@ -1,0 +1,4 @@
+DROP TABLE IF EXISTS inventory_scope;
+DROP TABLE IF EXISTS team_membership;
+DROP TABLE IF EXISTS team;
+DROP TABLE IF EXISTS app_user;
