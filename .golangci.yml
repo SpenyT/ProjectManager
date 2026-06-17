@@ -1,0 +1,56 @@
+version: "2"
+
+run:
+  timeout: 5m
+  issues-exit-code: 1
+
+linters:
+  default: none
+  enable:
+    - govet # catches suspicious constructs
+    - errcheck # forces handling of all errors (Google style)
+    - staticcheck # bugs, performance issues, deprecations
+    #   note: in v2, gosimple + stylecheck are folded into staticcheck
+
+    - revive # modern golint replacement, style-guide rules
+    - ineffassign # ineffectual assignments
+    - unused # dead code
+    - bodyclose # unclosed HTTP bodies (critical for API gateways)
+    - gosec # security vulnerability scanner
+
+    - gocritic # deep Go-idiom analysis
+
+  settings:
+    revive:
+      rules:
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: dot-imports
+        - name: error-naming
+        - name: exported
+    gocritic:
+      enabled-tags:
+        - performance
+        - diagnostic
+        - style
+    gosec:
+      severity: medium
+      confidence: medium
+
+  exclusions:
+
+    presets:
+      - common-false-positives
+      - std-error-handling
+    paths:
+      - vendor
+      - ".*\\.pb\\.go$"
+      - ".*\\.pb\\.gw\\.go$"
+      - ".*_gen\\.go$"
+    rules:
+      - path: _test\.go
+        linters:
+          - gosec
+          - errcheck
+          - bodyclose

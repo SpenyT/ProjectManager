@@ -1,0 +1,30 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+coverage.out
+.benchmarks/
+
+# Go build cache (not needed; go handles it)
+vendor/
+
+# Environment / secrets
+.env
+.env.local
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Buf generated code (if generated locally)
+gen/
