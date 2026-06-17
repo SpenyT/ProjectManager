@@ -1,0 +1,3 @@
+DROP TABLE IF EXISTS lot;
+DROP TABLE IF EXISTS order_line;
+DROP TABLE IF EXISTS purchase_order;
