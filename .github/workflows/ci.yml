@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: "1.22"
+  GO_VERSION: "1.24"
 
 jobs:
   build:
@@ -42,19 +42,20 @@ jobs:
         with:
           version: v2.12
 
-  buf:
-    name: Proto / API contract
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-      - name: buf lint + breaking
-        uses: bufbuild/buf-action@v1
-        with:
-          lint: true
-          breaking: true
-          breaking_against: "https://github.com/${{ github.repository }}.git#branch=main"
+  # buf disabled until proto files exist — re-enable when gRPC API design starts
+  # buf:
+  #   name: Proto / API contract
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v6
+  #       with:
+  #         fetch-depth: 0
+  #     - name: buf lint + breaking
+  #       uses: bufbuild/buf-action@v1
+  #       with:
+  #         lint: true
+  #         breaking: true
+  #         breaking_against: "https://github.com/${{ github.repository }}.git#branch=main"
 
   test:
     name: Test
