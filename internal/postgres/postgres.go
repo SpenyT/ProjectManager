@@ -1,4 +1,14 @@
 // Package postgres implements the domain repository interfaces against PostgreSQL.
+//
+// Transaction-boundary convention:
+//
+//	Every public method that must write two or more rows atomically — or that
+//	would leave partial state on interruption — opens exactly one transaction
+//	via pgx.BeginTxFunc.  Private helpers (lowercase names) never open
+//	transactions; they always execute inside one provided by their caller.
+//	Single-statement public methods use the pool directly (autocommit).
+//
+// This convention is why private helpers accept pgx.Tx, not *pgxpool.Pool.
 package postgres
 
 import (

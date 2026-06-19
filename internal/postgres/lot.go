@@ -23,12 +23,18 @@ func NewLotRepo(pool *pgxpool.Pool) *LotRepo {
 
 var _ domain.LotRepository = (*LotRepo)(nil)
 
-const lotCols = `id, canonical_part_id, source_order_line_id,
-	qty_received, remaining_qty, unit_cost::text, currency, received_at, created_at, updated_at`
+const (
+	// lotCols is used in RETURNING clauses where no table alias is needed.
+	lotCols = `id, canonical_part_id, source_order_line_id,
+		qty_received, remaining_qty, unit_cost::text, currency, received_at, created_at, updated_at`
+	// lotColsQ is used in SELECT … FROM lot l JOIN … queries to avoid ambiguous column references.
+	lotColsQ = `l.id, l.canonical_part_id, l.source_order_line_id,
+		l.qty_received, l.remaining_qty, l.unit_cost::text, l.currency, l.received_at, l.created_at, l.updated_at`
+)
 
 func (r *LotRepo) GetByID(ctx context.Context, sc domain.ScopeCtx, id int64) (*domain.Lot, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT l.`+lotCols+`
+		SELECT `+lotColsQ+`
 		FROM lot l
 		JOIN order_line ol ON ol.id = l.source_order_line_id
 		JOIN purchase_order po ON po.id = ol.order_id
@@ -39,9 +45,10 @@ func (r *LotRepo) GetByID(ctx context.Context, sc domain.ScopeCtx, id int64) (*d
 	return scanLot(row)
 }
 
-// ExplodeOrderLine creates lots from a delivered order line.
+// ExplodeOrderLine creates lots from a delivered order line inside a single transaction.
 // Non-kit: one lot for the full qty with unit_cost from the line.
 // Kit: N lots (one per KitContent), unit_cost = NULL, qty = line.Qty × content.QtyPerUnit.
+// All inserts are atomic: if any lot fails, the entire explosion is rolled back.
 func (r *LotRepo) ExplodeOrderLine(
 	ctx context.Context,
 	sc domain.ScopeCtx,
@@ -49,19 +56,27 @@ func (r *LotRepo) ExplodeOrderLine(
 	offering *domain.Offering,
 	kitContents []*domain.KitContent,
 ) ([]*domain.Lot, error) {
-	if offering.IsKit {
-		return r.explodeKit(ctx, sc, line, kitContents)
-	}
-	return r.explodeSingle(ctx, sc, line)
+	var lots []*domain.Lot
+	err := pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		var err error
+		if offering.IsKit {
+			lots, err = explodeKit(ctx, tx, sc, line, kitContents)
+		} else {
+			lots, err = explodeSingle(ctx, tx, sc, line)
+		}
+		return err
+	})
+	return lots, mapErr(err)
 }
 
-func (r *LotRepo) explodeSingle(ctx context.Context, sc domain.ScopeCtx, line *domain.OrderLine) ([]*domain.Lot, error) {
+// explodeSingle creates one lot for a non-kit order line. Must run inside a transaction.
+func explodeSingle(ctx context.Context, tx pgx.Tx, sc domain.ScopeCtx, line *domain.OrderLine) ([]*domain.Lot, error) {
 	if line.OfferingID == uuid.Nil {
 		return nil, fmt.Errorf("explodeSingle: line.OfferingID is zero")
 	}
-	// Resolve canonical_part_id from the offering.
+	// Resolve canonical_part_id inside the transaction to avoid TOCTOU on the offering.
 	var canonicalPartID uuid.UUID
-	err := r.pool.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		SELECT o.canonical_part_id
 		FROM offering o WHERE o.id = $1 AND o.canonical_part_id IS NOT NULL`,
 		line.OfferingID).Scan(&canonicalPartID)
@@ -69,7 +84,7 @@ func (r *LotRepo) explodeSingle(ctx context.Context, sc domain.ScopeCtx, line *d
 		return nil, fmt.Errorf("explodeSingle: resolve canonical part: %w", mapErr(err))
 	}
 
-	row := r.pool.QueryRow(ctx, `
+	row := tx.QueryRow(ctx, `
 		WITH auth AS (
 			SELECT 1 FROM order_line ol
 			JOIN purchase_order po ON po.id = ol.order_id
@@ -90,13 +105,15 @@ func (r *LotRepo) explodeSingle(ctx context.Context, sc domain.ScopeCtx, line *d
 	return []*domain.Lot{lot}, nil
 }
 
-func (r *LotRepo) explodeKit(ctx context.Context, sc domain.ScopeCtx, line *domain.OrderLine, contents []*domain.KitContent) ([]*domain.Lot, error) {
+// explodeKit creates N lots, one per KitContent. Must run inside a transaction.
+// All lots share the same source_order_line_id; unit_cost is NULL for each.
+func explodeKit(ctx context.Context, tx pgx.Tx, sc domain.ScopeCtx, line *domain.OrderLine, contents []*domain.KitContent) ([]*domain.Lot, error) {
 	if len(contents) == 0 {
 		return nil, fmt.Errorf("explodeKit: no kit contents provided")
 	}
-	// Verify scope access once, then insert a lot per content.
+	// Verify scope access once before inserting any lots.
 	var scopeOK bool
-	err := r.pool.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		SELECT true FROM order_line ol
 		JOIN purchase_order po ON po.id = ol.order_id
 		JOIN inventory_scope s ON s.id = po.scope_id
@@ -110,7 +127,7 @@ func (r *LotRepo) explodeKit(ctx context.Context, sc domain.ScopeCtx, line *doma
 	lots := make([]*domain.Lot, 0, len(contents))
 	for _, kc := range contents {
 		qty := line.Qty * kc.QtyPerUnit
-		row := r.pool.QueryRow(ctx, `
+		row := tx.QueryRow(ctx, `
 			INSERT INTO lot (canonical_part_id, source_order_line_id, qty_received, remaining_qty, unit_cost, currency)
 			VALUES ($1, $2, $3, $3, NULL, $4)
 			RETURNING `+lotCols,
@@ -126,7 +143,7 @@ func (r *LotRepo) explodeKit(ctx context.Context, sc domain.ScopeCtx, line *doma
 
 func (r *LotRepo) ListByPart(ctx context.Context, sc domain.ScopeCtx, partID uuid.UUID) ([]*domain.Lot, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT l.`+lotCols+`
+		SELECT `+lotColsQ+`
 		FROM lot l
 		JOIN order_line ol ON ol.id = l.source_order_line_id
 		JOIN purchase_order po ON po.id = ol.order_id
@@ -154,10 +171,12 @@ func (r *LotRepo) ListByPart(ctx context.Context, sc domain.ScopeCtx, partID uui
 func (r *LotRepo) GetAvailability(ctx context.Context, sc domain.ScopeCtx, partID uuid.UUID) (*domain.Availability, error) {
 	var av domain.Availability
 	err := r.pool.QueryRow(ctx, `
-		SELECT scope_id, canonical_part_id, on_hand, available
-		FROM inventory_available
-		WHERE scope_id = $1 AND canonical_part_id = $2`,
-		sc.ScopeID, partID).Scan(&av.ScopeID, &av.CanonicalPartID, &av.OnHand, &av.Available)
+		SELECT ia.scope_id, ia.canonical_part_id, ia.on_hand, ia.available
+		FROM inventory_available ia
+		JOIN inventory_scope s ON s.id = ia.scope_id
+		JOIN team_membership tm ON tm.team_id = s.team_id
+		WHERE ia.scope_id = $1 AND ia.canonical_part_id = $2 AND tm.user_id = $3`,
+		sc.ScopeID, partID, sc.UserID).Scan(&av.ScopeID, &av.CanonicalPartID, &av.OnHand, &av.Available)
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -166,8 +185,8 @@ func (r *LotRepo) GetAvailability(ctx context.Context, sc domain.ScopeCtx, partI
 
 func scanLot(row pgx.Row) (*domain.Lot, error) {
 	var (
-		l        domain.Lot
-		costStr  *string
+		l       domain.Lot
+		costStr *string
 	)
 	if err := row.Scan(
 		&l.ID, &l.CanonicalPartID, &l.SourceOrderLineID,

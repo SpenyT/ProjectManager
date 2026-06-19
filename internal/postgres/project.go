@@ -23,11 +23,14 @@ func NewProjectRepo(pool *pgxpool.Pool) *ProjectRepo {
 
 var _ domain.ProjectRepository = (*ProjectRepo)(nil)
 
-const projCols = `id, scope_id, name, status, created_at, updated_at`
+const (
+	projCols  = `id, scope_id, name, status, created_at, updated_at`
+	projColsQ = `p.id, p.scope_id, p.name, p.status, p.created_at, p.updated_at`
+)
 
 func (r *ProjectRepo) GetByID(ctx context.Context, sc domain.ScopeCtx, id int64) (*domain.Project, error) {
 	row := r.pool.QueryRow(ctx, `
-		SELECT p.`+projCols+`
+		SELECT `+projColsQ+`
 		FROM project p
 		JOIN inventory_scope s ON s.id = p.scope_id
 		JOIN team_membership tm ON tm.team_id = s.team_id
@@ -53,7 +56,7 @@ func (r *ProjectRepo) Create(ctx context.Context, sc domain.ScopeCtx, project *d
 
 func (r *ProjectRepo) List(ctx context.Context, sc domain.ScopeCtx) ([]*domain.Project, error) {
 	rows, err := r.pool.Query(ctx, `
-		SELECT p.`+projCols+`
+		SELECT `+projColsQ+`
 		FROM project p
 		JOIN inventory_scope s ON s.id = p.scope_id
 		JOIN team_membership tm ON tm.team_id = s.team_id

@@ -99,6 +99,19 @@ type ProjectRepository interface {
 	TransitionStatus(ctx context.Context, sc ScopeCtx, id int64, to ProjectStatus, breakage []BreakageRecord) error
 }
 
+// ProjectRequirementRepository manages the BOM requirements within a scoped project.
+//
+// Remove is blocked when the project is active (live hard claims exist), or
+// when any draw for the requirement has consumed_qty > 0 (inventory has been
+// permanently spent against it — the requirement is now historical record).
+// The DB also blocks via FK RESTRICT on breakage_event → draw, but the explicit
+// guard above returns a clear ErrConflict before reaching the constraint.
+type ProjectRequirementRepository interface {
+	Add(ctx context.Context, sc ScopeCtx, req *ProjectRequirement) (*ProjectRequirement, error)
+	List(ctx context.Context, sc ScopeCtx, projectID int64) ([]*ProjectRequirement, error)
+	Remove(ctx context.Context, sc ScopeCtx, id int64) error
+}
+
 // DrawRepository manages draw claims against lots.
 type DrawRepository interface {
 	// ClaimLots creates or accumulates draw claims for a requirement against

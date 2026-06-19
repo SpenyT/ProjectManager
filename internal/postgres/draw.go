@@ -1,8 +1,10 @@
 package postgres
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -60,30 +62,42 @@ func (r *DrawRepo) ClaimLots(
 			viaStr = &s
 		}
 
+		// Sort by lot_id before locking to guarantee a consistent lock-acquisition
+		// order across concurrent callers. Without this, two callers claiming
+		// overlapping lots in opposite orders can deadlock.
+		slices.SortFunc(claims, func(a, b domain.LotClaim) int {
+			return cmp.Compare(a.LotID, b.LotID)
+		})
+
 		for _, claim := range claims {
-			// Lock the lot and compute available in one round-trip.
-			// The FOR UPDATE serializes all concurrent ClaimLots calls for this lot.
-			var (
-				remaining   int64
-				activeClaim int64
-			)
+			// Step 1: Lock the lot row. This establishes the critical-section boundary —
+			// all concurrent ClaimLots calls for this lot serialize here.
+			var remaining int64
 			err := tx.QueryRow(ctx, `
-				SELECT l.remaining_qty, COALESCE(ac.active_claim, 0)
+				SELECT l.remaining_qty
 				FROM lot l
 				JOIN order_line ol ON ol.id = l.source_order_line_id
 				JOIN purchase_order po ON po.id = ol.order_id
-				LEFT JOIN LATERAL (
-					SELECT COALESCE(SUM(d.qty - d.consumed_qty), 0) AS active_claim
-					FROM draw d
-					JOIN project_requirement pr ON pr.id = d.project_requirement_id
-					JOIN project p ON p.id = pr.project_id
-					WHERE d.lot_id = l.id AND p.status = 'active'
-				) ac ON true
 				WHERE l.id = $1 AND po.scope_id = $2
 				FOR UPDATE OF l`,
-				claim.LotID, sc.ScopeID).Scan(&remaining, &activeClaim)
+				claim.LotID, sc.ScopeID).Scan(&remaining)
 			if err != nil {
 				return fmt.Errorf("ClaimLots: lock lot %d: %w", claim.LotID, mapErr(err))
+			}
+
+			// Step 2: Re-read active claims in a separate statement AFTER acquiring
+			// the lock. A combined FOR UPDATE + LATERAL evaluates the subquery with
+			// the pre-lock snapshot, which is stale. A separate statement sees the
+			// latest committed state (READ COMMITTED per-statement snapshot).
+			var activeClaim int64
+			if err := tx.QueryRow(ctx, `
+				SELECT COALESCE(SUM(d.qty - d.consumed_qty), 0)
+				FROM draw d
+				JOIN project_requirement pr ON pr.id = d.project_requirement_id
+				JOIN project p ON p.id = pr.project_id
+				WHERE d.lot_id = $1 AND p.status = 'active'`,
+				claim.LotID).Scan(&activeClaim); err != nil {
+				return fmt.Errorf("ClaimLots: active claims for lot %d: %w", claim.LotID, err)
 			}
 
 			if claim.Qty > remaining-activeClaim {
